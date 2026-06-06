@@ -11,6 +11,10 @@
 #include <pthread.h>
 #include <time.h>
 
+const float speed = 3.5f;
+const float look_speed = 4.0f;
+const float smoothing_factor = 0.18f;
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -22,8 +26,15 @@
 #define MAP_SIZE_SQ ((size_t)512 * 512)
 #define MAX_THREADS 32
 
-const char PANEL_CHARSET_DEFAULT[] = " .:-=+*#%@";
-const int PANEL_CHARSET_DEFAULT_LEN = sizeof(PANEL_CHARSET_DEFAULT) - 1;
+char *charset8  = "#*+=-:. ";
+char *charset16 = "S&MW$B@%#*+=-:. ";
+char *charset32 = "$#\\|)(1}{][?-_+~><i!lI;:,\"\n^`'. ";
+char *charset64 = "$@B%8&ahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. ";
+
+unsigned char ch;
+unsigned char generated_map_type = 5;
+unsigned char charset_index = 0;
+char * currentcharset;
 
 unsigned char *mape = NULL;
 struct termios orig_termios;
@@ -42,17 +53,14 @@ Vector3D *ray_lookup = NULL;
 int lookup_cols = 0;
 int lookup_rows = 0;
 
-float alpha = 0.0f, beta = 0.0f;
+float alpha = 0.0f, beta = -90.0f;
+float target_alpha = 0.0f, target_beta = 0.0f;
+
 float sin_a = 0.0f, cos_a = 1.0f;
 float sin_b = 0.0f, cos_b = 1.0f;
 
 Vector3D Pos = {256.0f, 256.0f, 40.0f};
 Vector3D target_Pos = {256.0f, 256.0f, 40.0f};
-float target_alpha = 0.0f, target_beta = 0.0f;
-
-const float speed = 3.5f;
-const float look_speed = 4.0f;
-const float smoothing_factor = 0.18f;
 
 struct winsize global_w;
 struct winsize render_w;
@@ -66,7 +74,7 @@ typedef struct {
 pthread_t threads[MAX_THREADS];
 ThreadWorker workers[MAX_THREADS];
 pthread_barrier_t barrier;
-int num_cores = 8;
+int num_cores = 32;
 volatile sig_atomic_t keep_running = 1;
 
 void cleanup() {
@@ -139,9 +147,9 @@ void *render_thread_strip(void *arg) {
                 float c    = ray.y * sin_b + ray.z * cos_b;
                 float a    = ray.x * cos_a - t_vy * sin_a;
                 float b    = ray.x * sin_a + t_vy * cos_a;
-                int charIndex = 0;
+                int charIndex = (1 << (charset_index + 3)) - 1;
 
-                for(int i = 0; i < 250; i++) {
+                for(int i = 0; i < 256; i++) {
                     Vector3D sample = {
                         .x = Pos.x + (i * a),
                         .y = Pos.y + (i * b),
@@ -151,32 +159,19 @@ void *render_thread_strip(void *arg) {
                     if (sample.x < 0.0f || sample.x >= (float)MAP_SIZE ||
                         sample.y < 0.0f || sample.y >= (float)MAP_SIZE ||
                         sample.z < 0.0f || sample.z >= (float)MAP_SIZE) {
-                        charIndex = map(i, 0, 250, PANEL_CHARSET_DEFAULT_LEN, 0);
-                        if (charIndex < 0) charIndex = 0;
-                        if (charIndex >= PANEL_CHARSET_DEFAULT_LEN) charIndex = PANEL_CHARSET_DEFAULT_LEN - 1;
+                        charIndex =  i >> (5 - charset_index);//map(i, 0, 256, PANEL_CHARSET_DEFAULT_LEN, 0);
+
                         break;
                     }
 
-                    int ENDPosX = (int)sample.x;
-                    int ENDPosY = (int)sample.y;
-                    int ENDPosZ = (int)sample.z;
-
-                    if (ENDPosX < 0 || ENDPosX >= MAP_SIZE ||
-                        ENDPosY < 0 || ENDPosY >= MAP_SIZE ||
-                        ENDPosZ < 0 || ENDPosZ >= MAP_SIZE) {
-                        continue;
-                    }
-
-                    size_t flat_index = ((size_t)ENDPosX * MAP_SIZE_SQ) + ((size_t)ENDPosY * MAP_SIZE) + ENDPosZ;
+                    size_t flat_index = ((size_t)sample.x * MAP_SIZE_SQ) + ((size_t)sample.y * MAP_SIZE) + (size_t)sample.z;
 
                     if (mape[flat_index]) {
-                        charIndex = map(i, 0, 150, PANEL_CHARSET_DEFAULT_LEN - 1, 0);
-                        if (charIndex < 0) charIndex = 0;
-                        if (charIndex >= PANEL_CHARSET_DEFAULT_LEN) charIndex = PANEL_CHARSET_DEFAULT_LEN - 1;
+                        charIndex =  i >> (5 - charset_index);//map(i, 0, 256, PANEL_CHARSET_DEFAULT_LEN - 1, 0);
                         break;
                     }
                 }
-                *buf_ptr++ = PANEL_CHARSET_DEFAULT[charIndex];
+                *buf_ptr++ = currentcharset[charIndex];
             }
             *buf_ptr++ = '\n';
         }
@@ -188,9 +183,9 @@ void *render_thread_strip(void *arg) {
 void generate_random_map() {
     memset(mape, 0, (size_t)MAP_SIZE * MAP_SIZE * MAP_SIZE);
     for(int i = 0; i < MAP_SIZE_SQ; i++) {
-        size_t rx = (size_t)(rand() % MAP_SIZE);
-        size_t ry = (size_t)(rand() % MAP_SIZE);
-        size_t rz = (size_t)(rand() % MAP_SIZE);
+        int rx = (int)(rand() % MAP_SIZE);
+        int ry = (int)(rand() % MAP_SIZE);
+        int rz = (int)(rand() % MAP_SIZE);
         mape[(rx * MAP_SIZE_SQ) + (ry * MAP_SIZE) + rz] = 1;
     }
 }
@@ -340,12 +335,13 @@ void generate_city_map() {
 }
 
 int main() {
-    num_cores = (int)sysconf(_SC_NPROCESSORS_ONLN);
-    if (num_cores > MAX_THREADS) num_cores = MAX_THREADS;
-    if (num_cores < 1) num_cores = 1;
 
     mape = calloc((size_t)MAP_SIZE * MAP_SIZE * MAP_SIZE, sizeof(unsigned char));
     if (!mape) return 1;
+    currentcharset = charset8;
+    num_cores = (int)sysconf(_SC_NPROCESSORS_ONLN);
+    if (num_cores > MAX_THREADS) num_cores = MAX_THREADS;
+    if (num_cores < 1) num_cores = 1;
 
     tcgetattr(STDIN_FILENO, &orig_termios);
     atexit(cleanup);
@@ -378,9 +374,6 @@ int main() {
         workers[i].end_y = (i == num_cores - 1) ? 0 : render_w.ws_row - ((i + 1) * rows_per_thread);
         pthread_create(&threads[i], NULL, render_thread_strip, &workers[i]);
     }
-
-    unsigned char ch;
-    unsigned char generated_map_type = 5;
 
     while (keep_running) {
         ioctl(STDOUT_FILENO, TIOCGWINSZ, &global_w);
@@ -431,14 +424,21 @@ int main() {
                  if (ch == ' ') { target_Pos.z += speed; }
                  if (ch == 'x' || ch == 'X') { target_Pos.z -= speed; }
                  if (ch == 'r' || ch == 'R') {
-                    generated_map_type = (generated_map_type + 1) % 6;
-                    switch (generated_map_type) {
+                    switch (generated_map_type = (generated_map_type + 1) % 6) {
                         case 0: generate_cubes_map(); break;
                         case 1: generate_pipenetwork_map(); break;
                         case 2: generate_wave_map(); break;
                         case 3: generate_cage_map(); break;
                         case 4: generate_city_map(); break;
                         default: generate_random_map(); break;
+                    }
+                }
+                if (ch == 'q' || ch == 'Q') {
+                    switch (charset_index = (charset_index + 1) % 4) {
+                        case 1: currentcharset = charset16; break;
+                        case 2: currentcharset = charset32; break;
+                        case 3: currentcharset = charset64; break;
+                        default: currentcharset = charset8; break;
                     }
                 }
             }
@@ -459,12 +459,12 @@ int main() {
         if (target_beta > 360.0f)  { target_beta -= 360.0f; beta -= 360.0f; }
         if (target_beta < -360.0f) { target_beta += 360.0f; beta += 360.0f; }
 
-        if (target_Pos.x < 5) target_Pos.x = 5; if (target_Pos.x > 506) target_Pos.x = 506;
-        if (target_Pos.y < 5) target_Pos.y = 5; if (target_Pos.y > 506) target_Pos.y = 506;
-        if (target_Pos.z < 5) target_Pos.z = 5; if (target_Pos.z > 506) target_Pos.z = 506;
-        if (Pos.x < 1.0f) Pos.x = 1.0f; if (Pos.x > 510.0f) Pos.x = 510.0f;
-        if (Pos.y < 1.0f) Pos.y = 1.0f; if (Pos.y > 510.0f) Pos.y = 510.0f;
-        if (Pos.z < 1.0f) Pos.z = 1.0f; if (Pos.z > 510.0f) Pos.z = 510.0f;
+        if (target_Pos.x < 2) target_Pos.x = 2; if (target_Pos.x > 512) target_Pos.x = 510;
+        if (target_Pos.y < 2) target_Pos.y = 2; if (target_Pos.y > 512) target_Pos.y = 510;
+        if (target_Pos.z < 2) target_Pos.z = 2; if (target_Pos.z > 510) target_Pos.z = 510;
+        if (Pos.x < 2.0f) Pos.x = 2.0f; if (Pos.x > 510.0f) Pos.x = 510.0f;
+        if (Pos.y < 2.0f) Pos.y = 2.0f; if (Pos.y > 510.0f) Pos.y = 510.0f;
+        if (Pos.z < 2.0f) Pos.z = 2.0f; if (Pos.z > 510.0f) Pos.z = 510.0f;
 
         sin_a = sinf(deg_to_rad(alpha));   cos_a = cosf(deg_to_rad(alpha));
         sin_b = sinf(deg_to_rad(beta));    cos_b = cosf(deg_to_rad(beta));
