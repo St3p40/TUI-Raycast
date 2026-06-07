@@ -26,14 +26,16 @@ const float smoothing_factor = 0.18f;
 #define MAP_SIZE_SQ ((size_t)512 * 512)
 #define MAX_THREADS 32
 
+char *charset2 = "# ";
+char *charset4 = "#-. ";
 char *charset8  = "#*+=-:. ";
 char *charset16 = "S&MW$B@%#*+=-:. ";
-char *charset32 = "$#\\|)(1}{][?-_+~><i!lI;:,\"\n^`'. ";
-char *charset64 = "$@B%8&ahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. ";
+char *charset32 = "$#\\|)(1}{][?-_+~><i!lI;:,\"=^`'. ";
+char *charset64 = "$@B%8&ahkbdpqwmO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. ";
 
 unsigned char ch;
 unsigned char generated_map_type = 5;
-unsigned char charset_index = 0;
+unsigned char charset_index = 2;
 char * currentcharset;
 
 unsigned char *mape = NULL;
@@ -59,8 +61,8 @@ float target_alpha = 0.0f, target_beta = 0.0f;
 float sin_a = 0.0f, cos_a = 1.0f;
 float sin_b = 0.0f, cos_b = 1.0f;
 
-Vector3D Pos = {256.0f, 256.0f, 40.0f};
-Vector3D target_Pos = {256.0f, 256.0f, 40.0f};
+Vector3D pos = {256.0f, 256.0f, 40.0f};
+Vector3D target_pos = {256.0f, 256.0f, 40.0f};
 
 struct winsize global_w;
 struct winsize render_w;
@@ -147,19 +149,19 @@ void *render_thread_strip(void *arg) {
                 float c    = ray.y * sin_b + ray.z * cos_b;
                 float a    = ray.x * cos_a - t_vy * sin_a;
                 float b    = ray.x * sin_a + t_vy * cos_a;
-                int charIndex = (1 << (charset_index + 3)) - 1;
+                int charIndex = (1 << (charset_index + 1)) - 1;
 
                 for(int i = 0; i < 256; i++) {
                     Vector3D sample = {
-                        .x = Pos.x + (i * a),
-                        .y = Pos.y + (i * b),
-                        .z = Pos.z + (i * c)
+                        .x = pos.x + (i * a),
+                        .y = pos.y + (i * b),
+                        .z = pos.z + (i * c)
                     };
 
                     if (sample.x < 0.0f || sample.x >= (float)MAP_SIZE ||
                         sample.y < 0.0f || sample.y >= (float)MAP_SIZE ||
                         sample.z < 0.0f || sample.z >= (float)MAP_SIZE) {
-                        charIndex =  i >> (5 - charset_index);//map(i, 0, 256, PANEL_CHARSET_DEFAULT_LEN, 0);
+                        charIndex =  i >> (7 - charset_index);//map(i, 0, 256, PANEL_CHARSET_DEFAULT_LEN, 0);
 
                         break;
                     }
@@ -167,7 +169,7 @@ void *render_thread_strip(void *arg) {
                     size_t flat_index = ((size_t)sample.x * MAP_SIZE_SQ) + ((size_t)sample.y * MAP_SIZE) + (size_t)sample.z;
 
                     if (mape[flat_index]) {
-                        charIndex =  i >> (5 - charset_index);//map(i, 0, 256, PANEL_CHARSET_DEFAULT_LEN - 1, 0);
+                        charIndex =  i >> (7 - charset_index);//map(i, 0, 256, PANEL_CHARSET_DEFAULT_LEN - 1, 0);
                         break;
                     }
                 }
@@ -210,7 +212,8 @@ void generate_cubes_map() {
 
 void generate_pipenetwork_map() {
     memset(mape, 0, (size_t)MAP_SIZE * MAP_SIZE * MAP_SIZE);
-    int num_pipes = 60;
+    int num_pipes = 256;
+
     for (int p = 0; p < num_pipes; p++) {
         int x = rand() % MAP_SIZE;
         int y = rand() % MAP_SIZE;
@@ -226,20 +229,25 @@ void generate_pipenetwork_map() {
         int thickness = 2 + (rand() % 4);
 
         for (int step = 0; step < length; step++) {
-            for (int tx = -thickness; tx <= thickness; tx++) {
-                for (int ty = -thickness; ty <= thickness; ty++) {
-                    for (int tz = -thickness; tz <= thickness; tz++) {
+            for (int tx = (dx ? 0 : -thickness); tx <= (dx ? 0 : thickness); tx++) {
+                for (int ty = (dy ? 0 : -thickness); ty <= (dy ? 0 : thickness); ty++) {
+                    for (int tz = (dz ? 0 : -thickness); tz <= (dz ? 0 : thickness); tz++) {
                         int px = x + tx;
                         int py = y + ty;
                         int pz = z + tz;
 
-                        if (px >= 0 && px < MAP_SIZE && py >= 0 && py < MAP_SIZE && pz >= 0 && pz < MAP_SIZE) {
+                        // Bounds checking
+                        if (px >= 0 && px < MAP_SIZE &&
+                            py >= 0 && py < MAP_SIZE &&
+                            pz >= 0 && pz < MAP_SIZE) {
                             mape[((size_t)px * MAP_SIZE_SQ) + ((size_t)py * MAP_SIZE) + pz] = 1;
                         }
                     }
                 }
             }
-            x += dx; y += dy; z += dz;
+            x += dx;
+            y += dy;
+            z += dz;
         }
     }
 }
@@ -411,18 +419,18 @@ int main() {
                 }
             }
             else {
-                 if (ch == 'w' || ch == 'W') { target_Pos.x += forward.x * speed; target_Pos.y += forward.y * speed; target_Pos.z += forward.z * speed; }
-                 if (ch == 's' || ch == 'S') { target_Pos.x -= forward.x * speed; target_Pos.y -= forward.y * speed; target_Pos.z -= forward.z * speed; }
-                 if (ch == 'a' || ch == 'A') { target_Pos.x -= strafe.x * speed;  target_Pos.y -= strafe.y * speed;  target_Pos.z -= strafe.z * speed; }
-                 if (ch == 'd' || ch == 'D') { target_Pos.x += strafe.x * speed;  target_Pos.y += strafe.y * speed;  target_Pos.z += strafe.z * speed; }
+                 if (ch == 'w' || ch == 'W') { target_pos.x += forward.x * speed; target_pos.y += forward.y * speed; target_pos.z += forward.z * speed; }
+                 if (ch == 's' || ch == 'S') { target_pos.x -= forward.x * speed; target_pos.y -= forward.y * speed; target_pos.z -= forward.z * speed; }
+                 if (ch == 'a' || ch == 'A') { target_pos.x -= strafe.x * speed;  target_pos.y -= strafe.y * speed;  target_pos.z -= strafe.z * speed; }
+                 if (ch == 'd' || ch == 'D') { target_pos.x += strafe.x * speed;  target_pos.y += strafe.y * speed;  target_pos.z += strafe.z * speed; }
 
-                 if (ch == 'i' || ch == 'I') { target_beta += look_speed; }
-                 if (ch == 'k' || ch == 'K') { target_beta -= look_speed; }
-                 if (ch == 'j' || ch == 'J') { target_alpha += look_speed;}
-                 if (ch == 'l' || ch == 'L') { target_alpha -= look_speed;}
+                 if (ch == 'i' || ch == 'I') { target_beta += look_speed; if (target_beta > 89.0f)  target_beta = 89.0f; }
+                 if (ch == 'k' || ch == 'K') { target_beta -= look_speed; if (target_beta < -89.0f) target_beta = -89.0f; }
+                 if (ch == 'j' || ch == 'J') { target_alpha += look_speed; if (target_alpha > 360.0f)  { target_alpha -= 360.0f; alpha -= 360.0f; } }
+                 if (ch == 'l' || ch == 'L') { target_alpha -= look_speed; if (target_alpha < -360.0f) { target_alpha += 360.0f; alpha += 360.0f; } }
 
-                 if (ch == ' ') { target_Pos.z += speed; }
-                 if (ch == 'x' || ch == 'X') { target_Pos.z -= speed; }
+                 if (ch == ' ') { target_pos.z += speed; }
+                 if (ch == 'x' || ch == 'X') { target_pos.z -= speed; }
                  if (ch == 'r' || ch == 'R') {
                     switch (generated_map_type = (generated_map_type + 1) % 6) {
                         case 0: generate_cubes_map(); break;
@@ -434,37 +442,31 @@ int main() {
                     }
                 }
                 if (ch == 'q' || ch == 'Q') {
-                    switch (charset_index = (charset_index + 1) % 4) {
-                        case 1: currentcharset = charset16; break;
-                        case 2: currentcharset = charset32; break;
-                        case 3: currentcharset = charset64; break;
-                        default: currentcharset = charset8; break;
+                    switch (charset_index = (charset_index + 1) % 6) {
+                        case 1: currentcharset = charset4; break;
+                        case 2: currentcharset = charset8; break;
+                        case 3: currentcharset = charset16; break;
+                        case 4: currentcharset = charset32; break;
+                        case 5: currentcharset = charset64; break;
+                        default: currentcharset = charset2; break;
                     }
                 }
             }
         }
 
-        if (target_beta > 89.0f)  target_beta = 89.0f;
-        if (target_beta < -89.0f) target_beta = -89.0f;
-
         alpha += (target_alpha - alpha) * smoothing_factor;
         beta  += (target_beta - beta) * smoothing_factor;
 
-        Pos.x += (target_Pos.x - Pos.x) * smoothing_factor;
-        Pos.y += (target_Pos.y - Pos.y) * smoothing_factor;
-        Pos.z += (target_Pos.z - Pos.z) * smoothing_factor;
+        pos.x += (target_pos.x - pos.x) * smoothing_factor;
+        pos.y += (target_pos.y - pos.y) * smoothing_factor;
+        pos.z += (target_pos.z - pos.z) * smoothing_factor;
 
-        if (target_alpha > 360.0f)  { target_alpha -= 360.0f; alpha -= 360.0f; }
-        if (target_alpha < -360.0f) { target_alpha += 360.0f; alpha += 360.0f; }
-        if (target_beta > 360.0f)  { target_beta -= 360.0f; beta -= 360.0f; }
-        if (target_beta < -360.0f) { target_beta += 360.0f; beta += 360.0f; }
-
-        if (target_Pos.x < 2) target_Pos.x = 2; if (target_Pos.x > 512) target_Pos.x = 510;
-        if (target_Pos.y < 2) target_Pos.y = 2; if (target_Pos.y > 512) target_Pos.y = 510;
-        if (target_Pos.z < 2) target_Pos.z = 2; if (target_Pos.z > 510) target_Pos.z = 510;
-        if (Pos.x < 2.0f) Pos.x = 2.0f; if (Pos.x > 510.0f) Pos.x = 510.0f;
-        if (Pos.y < 2.0f) Pos.y = 2.0f; if (Pos.y > 510.0f) Pos.y = 510.0f;
-        if (Pos.z < 2.0f) Pos.z = 2.0f; if (Pos.z > 510.0f) Pos.z = 510.0f;
+        if (target_pos.x < 2) target_pos.x = 2; if (target_pos.x > 512) target_pos.x = 510;
+        if (target_pos.y < 2) target_pos.y = 2; if (target_pos.y > 512) target_pos.y = 510;
+        if (target_pos.z < 2) target_pos.z = 2; if (target_pos.z > 510) target_pos.z = 510;
+        if (pos.x < 2.0f) pos.x = 2.0f; if (pos.x > 510.0f) pos.x = 510.0f;
+        if (pos.y < 2.0f) pos.y = 2.0f; if (pos.y > 510.0f) pos.y = 510.0f;
+        if (pos.z < 2.0f) pos.z = 2.0f; if (pos.z > 510.0f) pos.z = 510.0f;
 
         sin_a = sinf(deg_to_rad(alpha));   cos_a = cosf(deg_to_rad(alpha));
         sin_b = sinf(deg_to_rad(beta));    cos_b = cosf(deg_to_rad(beta));
