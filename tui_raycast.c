@@ -153,13 +153,11 @@ void *render_thread_strip(void *arg) {
                 float a    = ray.x * cos_a - t_vy * sin_a;
                 float b    = ray.x * sin_a + t_vy * cos_a;
                 int charIndex = (1 << (charset_index + 1)) - 1;
-
+                Vector3D sample = pos; 
                 for(int i = 0; i < 256; i++) {
-                    Vector3D sample = {
-                        .x = pos.x + (i * a),
-                        .y = pos.y + (i * b),
-                        .z = pos.z + (i * c)
-                    };
+                    sample.x += a;
+                    sample.y += b;
+                    sample.z += c;
 
                     int ray_hit_skybox = 0;
 
