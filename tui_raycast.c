@@ -154,57 +154,52 @@ void *render_thread_strip(void *arg) {
                 float c    = ray.y * sin_b + ray.z * cos_b;
                 float a    = ray.x * cos_a - t_vy * sin_a;
                 float b    = ray.x * sin_a + t_vy * cos_a;
-                int charIndex = (1 << (charset_index + 1)) - 1;
+
+                int i = 0;
                 Vector3D sample = pos; 
-                for(int i = 0; i < render_length; i++) {
+                for(i = 0; i < render_length; i++) {
                     sample.x += a;
                     sample.y += b;
                     sample.z += c;
 
-                    int ray_hit_skybox = 0;
-
                     if (sample.x < 0.0f) {
-                        if (map.border_type & B_LEFT) { ray_hit_skybox = 1; }
-                        else { sample.x = fmodf(sample.x, (float)map.width); if (sample.x < 0.0f) sample.x += (float)map.width; }
+                        if (map.border_type & B_LEFT) break;
+                        else if (map.border_type & B_RIGHT) {i = render_length; break;}
+                        else { sample.x += (float)map.width; }
+
                     } else if (sample.x >= (float)map.width) {
-                        if (map.border_type & B_RIGHT) { ray_hit_skybox = 1; }
-                        else { sample.x = fmodf(sample.x, (float)map.width); }
+                        if (map.border_type & B_RIGHT) break;
+                        else if (map.border_type & B_LEFT) {i = render_length; break;}
+                        else { sample.x -= (float)map.width; }
                     }
 
-                    if (!ray_hit_skybox) {
-                        if (sample.y < 0.0f) {
-                            if (map.border_type & B_BOTTOM) { ray_hit_skybox = 1; }
-                            else { sample.y = fmodf(sample.y, (float)map.length); if (sample.y < 0.0f) sample.y += (float)map.length; }
-                        } else if (sample.y >= (float)map.length) {
-                            if (map.border_type & B_TOP) { ray_hit_skybox = 1; }
-                            else { sample.y = fmodf(sample.y, (float)map.length); }
-                        }
+                    if (sample.y < 0.0f) {
+                        if (map.border_type & B_BACK) break;
+                        else if (map.border_type & B_FRONT) {i = render_length; break;}
+                        else { sample.y += (float)map.length; }
+
+                    } else if (sample.y >= (float)map.length) {
+                        if (map.border_type & B_FRONT) break;
+                        else if (map.border_type & B_BACK) {i = render_length; break;}
+                        else { sample.y -= (float)map.length; }
                     }
 
-                    if (!ray_hit_skybox) {
-                        if (sample.z < 0.0f) {
-                            if (map.border_type & B_FLOOR) { ray_hit_skybox = 1; }
-                            else { sample.z = fmodf(sample.z, (float)map.height); if (sample.z < 0.0f) sample.z += (float)map.height; }
-                        } else if (sample.z >= (float)map.height) {
-                            if (map.border_type & B_CEIL) { ray_hit_skybox = 1; }
-                            else { sample.z = fmodf(sample.z, (float)map.height); }
-                        }
+                    if (sample.z < 0.0f) {
+                        if (map.border_type & B_BOTTOM) break;
+                        else if (map.border_type & B_TOP) {i = render_length; break;}
+                        else { sample.z += (float)map.width; }
+
+                    } else if (sample.z >= (float)map.height) {
+                        if (map.border_type & B_TOP) break;
+                        else if (map.border_type & B_BOTTOM) {i = render_length; break;}
+                        else { sample.z -= (float)map.height; }
                     }
 
-                    if (ray_hit_skybox) {
-                        charIndex = i >> (7 - charset_index);
-                        break;
-                    }
-
-                    size_t flat_index = (((size_t)sample.x * map.length * map.height) + ((size_t)sample.y * map.height) + (size_t)sample.z);
-                    size_t byte_index = flat_index >> 3;
-
-                    if ((map.ptr[byte_index] & (1 << (flat_index % 8))) != 0) {
-                        charIndex = i >> (7 - charset_index);
+                    if (get_map_voxel(sample.x, sample.y, sample.z) != 0) {
                         break;
                     }
                 }
-                *buf_ptr++ = currentcharset[charIndex];
+                *buf_ptr++ = currentcharset[i >> (7 - charset_index)];
             }
             *buf_ptr++ = '\n';
         }
@@ -335,7 +330,7 @@ int main() {
             if (pos.x < 0.0f) pos.x += dim_x;
         }
 
-        if ((map.border_type & B_BOTTOM) || (map.border_type & B_TOP)) {
+        if ((map.border_type & B_BACK) || (map.border_type & B_FRONT)) {
             if (pos.y < 2.0f) { pos.y = 2.0f; target_pos.y = 0.0f; }
             if (pos.y > dim_y - 2.0f) { pos.y = dim_y - 2.0f; target_pos.y = 0.0f; }
         } else {
@@ -343,7 +338,7 @@ int main() {
             if (pos.y < 0.0f) pos.y += dim_y;
         }
 
-        if ((map.border_type & B_FLOOR) || (map.border_type & B_CEIL)) {
+        if ((map.border_type & B_BOTTOM) || (map.border_type & B_TOP)) {
             if (pos.z < 2.0f) { pos.z = 2.0f; target_pos.z = 0.0f; }
             if (pos.z > dim_z - 2.0f) { pos.z = dim_z - 2.0f; target_pos.z = 0.0f; }
         } else {
