@@ -40,6 +40,8 @@ const char *charset[] = {
 };
 
 unsigned char ch;
+
+unsigned char render_length = 224;
 unsigned char charset_index = 2;
 const char *currentcharset;
 
@@ -154,7 +156,7 @@ void *render_thread_strip(void *arg) {
                 float b    = ray.x * sin_a + t_vy * cos_a;
                 int charIndex = (1 << (charset_index + 1)) - 1;
                 Vector3D sample = pos; 
-                for(int i = 0; i < 256; i++) {
+                for(int i = 0; i < render_length; i++) {
                     sample.x += a;
                     sample.y += b;
                     sample.z += c;
@@ -213,6 +215,7 @@ void *render_thread_strip(void *arg) {
 
 int main() {
     currentcharset = charset[charset_index];
+    render_length = (~((unsigned char)0) << (7 - charset_index));
     num_cores = (int)sysconf(_SC_NPROCESSORS_ONLN);
     if (num_cores > MAX_THREADS) num_cores = MAX_THREADS;
     if (num_cores < 1) num_cores = 1;
@@ -304,6 +307,7 @@ int main() {
                 if (ch == 'q' || ch == 'Q') {
                     charset_index = (charset_index + 1) % 6;
                     currentcharset = charset[charset_index];
+                    render_length = (~((unsigned char)0) << (7 - charset_index));
                 }
             }
         }
