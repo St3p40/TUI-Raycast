@@ -197,13 +197,30 @@ void generate_city_map() {
     }
 }
 
+void generate_menger_spheres_map() {
+    int grid = 16;
+    int r_outer = 8;
+    preparemap(grid << 1, grid << 1, grid << 1, 0);
+                for (int x = -r_outer; x <= r_outer; x++) {
+                    for (int y = -r_outer; y <= r_outer; y++) {
+                        for (int z = -r_outer; z <= r_outer; z++) {
+                            int d2 = x*x + y*y + z*z;
+                            if (d2 <= r_outer*r_outer) {
+                                put_map_voxel((grid + x), (grid + y), grid + z);
+                            }
+                        }
+                    }
+                }
+            }
+
 void generate_next_map() {
-    switch (generated_map_type = (generated_map_type + 1) % 6) {
-        case 0: generate_cubes_map(); break;
+    switch (generated_map_type = (generated_map_type + 1) % 7) {
+        case 0: generate_menger_spheres_map(); break;
         case 1: generate_pipenetwork_map(); break;
         case 2: generate_wave_map(); break;
-        case 3: generate_cage_map(); break;
+        case 3: generate_cubes_map(); break;
         case 4: generate_city_map(); break;
-        default: generate_random_map(); break;
+        case 5: generate_random_map(); break;
+        default: generate_cage_map(); break;
     }
 }

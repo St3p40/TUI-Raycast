@@ -35,8 +35,8 @@ const char *charset[] = {
     "#-. ",
     "#*+=-:. ",
     "S&MW$B@%#*+=-:. ",
-    "$#\\|)(1}{][?-_+~><i!lI;:,\"=^`'. ",
-    "$@B%8&ahkbdpqwmO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. "
+    "$#|)(1}{][\\?-_+~<>i!lI;:,\"^`'=. ",
+    "$@B%8&WMmwbdpqkhOQ0ULCJYXanxuvcrjf/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. "
 };
 
 unsigned char ch;
@@ -48,7 +48,6 @@ const char *currentcharset;
 struct termios orig_termios;
 
 char *back_buffer = NULL;
-char *front_buffer = NULL;
 size_t buffer_size = 0;
 
 typedef struct {
@@ -76,7 +75,6 @@ typedef struct {
 
 pthread_t threads[MAX_THREADS];
 ThreadWorker workers[MAX_THREADS];
-pthread_barrier_t barrier;
 int num_cores = 32;
 volatile sig_atomic_t keep_running = 1;
 
@@ -84,11 +82,9 @@ void cleanup() {
     printf("\033[?2026l\033[?25h\033[2J\033[H");
     fflush(stdout);
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
-    pthread_barrier_destroy(&barrier);
-    if (map.ptr) free(map.ptr);
-    if (back_buffer) free(back_buffer);
-    if (front_buffer) free(front_buffer);
-    if (ray_lookup) free(ray_lookup);
+    if (map.ptr) free(map.ptr); map.ptr = NULL;
+    if (ray_lookup) free(ray_lookup); ray_lookup = NULL;
+    if (back_buffer) free(back_buffer); back_buffer = NULL ;
 }
 
 void handle_signal(int sig) {
@@ -124,6 +120,20 @@ void bake_screen_rays(int cols, int rows) {
     }
 }
 
+void update_terminal_size() {
+    struct winsize current_w;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &current_w) == -1) {
+        return;
+    }
+    if (current_w.ws_col != render_w.ws_col || current_w.ws_row != (render_w.ws_row + 1)) {
+        render_w = current_w;
+        if (render_w.ws_row > 1) {
+            render_w.ws_row -= 1;
+        }
+        bake_screen_rays(render_w.ws_col, render_w.ws_row);
+    }
+}
+
 void reset_player_to_safe() {
     pos.x = (float)map.width / 2.0f;
     pos.y = (float)map.length / 2.0f;
@@ -135,82 +145,70 @@ void reset_player_to_safe() {
 
 void *render_thread_strip(void *arg) {
     ThreadWorker *worker = (ThreadWorker *)arg;
-    while(1) {
-        pthread_barrier_wait(&barrier);
 
-        if (!keep_running) break;
+    for (int y = worker->start_y; y >= worker->end_y; y--) {
+        if (y < 0 || y >= render_w.ws_row) continue;
 
-        for (int y = worker->start_y; y >= worker->end_y; y--) {
-            if (y < 0 || y >= render_w.ws_row) continue;
+        size_t row_offset = PREFIX_LEN + (size_t)y * ((size_t)render_w.ws_col + 1);
+        char *buf_ptr = back_buffer + row_offset;
 
-            size_t row_offset = PREFIX_LEN + (size_t)y * ((size_t)render_w.ws_col + 1);
-            char *buf_ptr = back_buffer + row_offset;
+        for (int x = 0; x < render_w.ws_col; x++) {
+            size_t idx = (size_t)(render_w.ws_row - 1 - y) * render_w.ws_col + x;
+            Vector3D ray = ray_lookup[idx];
 
-            for (int x = 0; x < render_w.ws_col; x++) {
-                size_t idx = (size_t)(render_w.ws_row - 1 - y) * render_w.ws_col + x;
-                Vector3D ray = ray_lookup[idx];
+            float t_vy = ray.y * cos_b - ray.z * sin_b;
+            float c    = ray.y * sin_b + ray.z * cos_b;
+            float a    = ray.x * cos_a - t_vy * sin_a;
+            float b    = ray.x * sin_a + t_vy * cos_a;
 
-                float t_vy = ray.y * cos_b - ray.z * sin_b;
-                float c    = ray.y * sin_b + ray.z * cos_b;
-                float a    = ray.x * cos_a - t_vy * sin_a;
-                float b    = ray.x * sin_a + t_vy * cos_a;
+            int i = 0;
+            Vector3D sample = pos;
+            for(i = 0; i < render_length; i++) {
+                sample.x += a; sample.y += b; sample.z += c;
+                if (sample.x < 0.0f) {
+                    if (map.border_type & B_LEFT) break;
+                    else if (map.border_type & B_RIGHT) {i = render_length; break;}
+                    else { sample.x += (float)map.width; }
 
-                int i = 0;
-                Vector3D sample = pos; 
-                for(i = 0; i < render_length; i++) {
-                    sample.x += a;
-                    sample.y += b;
-                    sample.z += c;
-
-                    if (sample.x < 0.0f) {
-                        if (map.border_type & B_LEFT) break;
-                        else if (map.border_type & B_RIGHT) {i = render_length; break;}
-                        else { sample.x += (float)map.width; }
-
-                    } else if (sample.x >= (float)map.width) {
-                        if (map.border_type & B_RIGHT) break;
-                        else if (map.border_type & B_LEFT) {i = render_length; break;}
-                        else { sample.x -= (float)map.width; }
-                    }
-
-                    if (sample.y < 0.0f) {
-                        if (map.border_type & B_BACK) break;
-                        else if (map.border_type & B_FRONT) {i = render_length; break;}
-                        else { sample.y += (float)map.length; }
-
-                    } else if (sample.y >= (float)map.length) {
-                        if (map.border_type & B_FRONT) break;
-                        else if (map.border_type & B_BACK) {i = render_length; break;}
-                        else { sample.y -= (float)map.length; }
-                    }
-
-                    if (sample.z < 0.0f) {
-                        if (map.border_type & B_BOTTOM) break;
-                        else if (map.border_type & B_TOP) {i = render_length; break;}
-                        else { sample.z += (float)map.width; }
-
-                    } else if (sample.z >= (float)map.height) {
-                        if (map.border_type & B_TOP) break;
-                        else if (map.border_type & B_BOTTOM) {i = render_length; break;}
-                        else { sample.z -= (float)map.height; }
-                    }
-
-                    if (get_map_voxel(sample.x, sample.y, sample.z) != 0) {
-                        break;
-                    }
+                } else if (sample.x >= (float)map.width) {
+                    if (map.border_type & B_RIGHT) break;
+                    else if (map.border_type & B_LEFT) {i = render_length; break;}
+                    else { sample.x -= (float)map.width; }
                 }
-                *buf_ptr++ = currentcharset[i >> (7 - charset_index)];
+
+                if (sample.y < 0.0f) {
+                    if (map.border_type & B_BACK) break;
+                    else if (map.border_type & B_FRONT) {i = render_length; break;}
+                    else { sample.y += (float)map.length; }
+
+                } else if (sample.y >= (float)map.length) {
+                    if (map.border_type & B_FRONT) break;
+                    else if (map.border_type & B_BACK) {i = render_length; break;}
+                    else { sample.y -= (float)map.length; }
+                }
+
+                if (sample.z < 0.0f) {
+                    if (map.border_type & B_BOTTOM) break;
+                    else if (map.border_type & B_TOP) {i = render_length; break;}
+                    else { sample.z += (float)map.width; }
+
+                } else if (sample.z >= (float)map.height) {
+                    if (map.border_type & B_TOP) break;
+                    else if (map.border_type & B_BOTTOM) {i = render_length; break;}
+                    else { sample.z -= (float)map.height; }
+                }
+
+                if (get_map_voxel(sample.x, sample.y, sample.z) != 0) break;
             }
-            *buf_ptr++ = '\n';
+            *buf_ptr++ = currentcharset[i >> (7 - charset_index)];
         }
-        pthread_barrier_wait(&barrier);
+        *buf_ptr++ = '\n';
     }
     return NULL;
 }
 
 int main() {
     currentcharset = charset[charset_index];
-    render_length = (~((unsigned char)0) << (7 - charset_index));
     num_cores = (int)sysconf(_SC_NPROCESSORS_ONLN);
     if (num_cores > MAX_THREADS) num_cores = MAX_THREADS;
     if (num_cores < 1) num_cores = 1;
@@ -231,41 +229,18 @@ int main() {
     fflush(stdout);
 
     generate_random_map();
-
-    pthread_barrier_init(&barrier, NULL, num_cores + 1);
     srand((unsigned int)time(NULL));
 
-    ioctl(STDOUT_FILENO, TIOCGWINSZ, &global_w);
-    render_w = global_w;
-    bake_screen_rays(render_w.ws_col, render_w.ws_row);
-
-    int rows_per_thread = render_w.ws_row / num_cores;
-    for (int i = 0; i < num_cores; i++) {
-        workers[i].thread_id = i;
-        workers[i].start_y = render_w.ws_row - 1 - (i * rows_per_thread);
-        workers[i].end_y = (i == num_cores - 1) ? 0 : render_w.ws_row - ((i + 1) * rows_per_thread);
-        pthread_create(&threads[i], NULL, render_thread_strip, &workers[i]);
-    }
+    update_terminal_size();
 
     while (keep_running) {
-        ioctl(STDOUT_FILENO, TIOCGWINSZ, &global_w);
-        
-        if (global_w.ws_col != render_w.ws_col || global_w.ws_row != render_w.ws_row) {
-            render_w = global_w;
-            bake_screen_rays(render_w.ws_col, render_w.ws_row);
-            rows_per_thread = render_w.ws_row / num_cores;
-            for (int i = 0; i < num_cores; i++) {
-                workers[i].start_y = render_w.ws_row - 1 - (i * rows_per_thread);
-                workers[i].end_y = (i == num_cores - 1) ? 0 : render_w.ws_row - ((i + 1) * rows_per_thread);
-            }
-        }
+        update_terminal_size();
 
         size_t frame_data_bytes = (size_t)(render_w.ws_col + 1) * render_w.ws_row;
         size_t required_size = frame_data_bytes + PREFIX_LEN + SUFFIX_LEN + 64;
         if (required_size > buffer_size) {
             buffer_size = required_size;
             back_buffer = realloc(back_buffer, buffer_size);
-            front_buffer = realloc(front_buffer, buffer_size);
         }
 
         Vector3D forward = { .x = -sin_a * cos_b, .y = cos_a * cos_b, .z = sin_b };
@@ -314,37 +289,24 @@ int main() {
         target_pos.y += (wish_dir.y * speed - target_pos.y) * smoothing_factor;
         target_pos.z += (wish_dir.z * speed - target_pos.z) * smoothing_factor;
 
-        pos.x += target_pos.x;
-        pos.y += target_pos.y;
-        pos.z += target_pos.z;
+        pos.x += target_pos.x; pos.y += target_pos.y; pos.z += target_pos.z;
 
-        float dim_x = (float)map.width;
-        float dim_y = (float)map.length;
-        float dim_z = (float)map.height;
+        float dim_x = (float)map.width; float dim_y = (float)map.length; float dim_z = (float)map.height;
 
         if ((map.border_type & B_LEFT) || (map.border_type & B_RIGHT)) {
             if (pos.x < 2.0f) { pos.x = 2.0f; target_pos.x = 0.0f; }
             if (pos.x > dim_x - 2.0f) { pos.x = dim_x - 2.0f; target_pos.x = 0.0f; }
-        } else {
-            pos.x = fmodf(pos.x, dim_x);
-            if (pos.x < 0.0f) pos.x += dim_x;
-        }
+        } else { pos.x = fmodf(pos.x, dim_x); if (pos.x < 0.0f) pos.x += dim_x; }
 
         if ((map.border_type & B_BACK) || (map.border_type & B_FRONT)) {
             if (pos.y < 2.0f) { pos.y = 2.0f; target_pos.y = 0.0f; }
             if (pos.y > dim_y - 2.0f) { pos.y = dim_y - 2.0f; target_pos.y = 0.0f; }
-        } else {
-            pos.y = fmodf(pos.y, dim_y);
-            if (pos.y < 0.0f) pos.y += dim_y;
-        }
+        } else { pos.y = fmodf(pos.y, dim_y); if (pos.y < 0.0f) pos.y += dim_y; }
 
         if ((map.border_type & B_BOTTOM) || (map.border_type & B_TOP)) {
             if (pos.z < 2.0f) { pos.z = 2.0f; target_pos.z = 0.0f; }
             if (pos.z > dim_z - 2.0f) { pos.z = dim_z - 2.0f; target_pos.z = 0.0f; }
-        } else {
-            pos.z = fmodf(pos.z, dim_z);
-            if (pos.z < 0.0f) pos.z += dim_z;
-        }
+        } else { pos.z = fmodf(pos.z, dim_z); if (pos.z < 0.0f) pos.z += dim_z; }
 
         sin_a = sinf(deg_to_rad(alpha));   cos_a = cosf(deg_to_rad(alpha));
         sin_b = sinf(deg_to_rad(beta));    cos_b = cosf(deg_to_rad(beta));
@@ -353,21 +315,23 @@ int main() {
         size_t final_trailer_offset = PREFIX_LEN + frame_data_bytes;
         memcpy(back_buffer + final_trailer_offset, SUFFIX_STR, SUFFIX_LEN);
 
-        pthread_barrier_wait(&barrier);
-        pthread_barrier_wait(&barrier);
+        int rows_per_thread = render_w.ws_row / num_cores;
+        for (int i = 0; i < num_cores; i++) {
+            workers[i].thread_id = i;
+            workers[i].start_y = render_w.ws_row - 1 - (i * rows_per_thread);
+            workers[i].end_y = (i == num_cores - 1) ? 0 : render_w.ws_row - ((i + 1) * rows_per_thread);
+
+            pthread_create(&threads[i], NULL, render_thread_strip, &workers[i]);
+        }
+
+        for (int i = 0; i < num_cores; i++) {
+            pthread_join(threads[i], NULL);
+        }
 
         size_t packet_size = final_trailer_offset + SUFFIX_LEN;
-        if (memcmp(back_buffer, front_buffer, packet_size) != 0) {
-            memcpy(front_buffer, back_buffer, packet_size);
-            write(STDOUT_FILENO, front_buffer, packet_size);
-        }
-        usleep(10000);
-    }
+        write(STDOUT_FILENO, back_buffer, packet_size);
 
-    pthread_barrier_wait(&barrier); 
-    
-    for (int i = 0; i < num_cores; i++) {
-        pthread_join(threads[i], NULL);
+        usleep(10000);
     }
 
     cleanup();
