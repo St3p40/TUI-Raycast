@@ -25,10 +25,8 @@ const float smoothing_factor = 0.18f;
 
 #define MAX_THREADS 32
 
-#define PREFIX_STR "\033[?2026h\033[H"
-#define PREFIX_LEN 11
-#define SUFFIX_STR "\033[?2026l"
-#define SUFFIX_LEN 8
+#define PREFIX_STR "\033[H" 
+#define PREFIX_LEN 3
 
 const char *charset[] = {
     "# ",
@@ -69,6 +67,8 @@ Vector3D target_pos = {0.0f, 0.0f, 0.0f};
 struct winsize global_w;
 struct winsize render_w;
 
+size_t frame_data_bytes, required_size;
+
 typedef struct {
     int thread_id, start_y, end_y;
 } ThreadWorker;
@@ -79,7 +79,7 @@ int num_cores = 32;
 volatile sig_atomic_t keep_running = 1;
 
 void cleanup() {
-    printf("\033[?2026l\033[?25h\033[2J\033[H");
+    printf("\033[?2026l\033[?25h\033[?7h\033[2J\033[H"); 
     fflush(stdout);
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
     if (map.ptr) free(map.ptr); map.ptr = NULL;
@@ -125,12 +125,27 @@ void update_terminal_size() {
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &current_w) == -1) {
         return;
     }
-    if (current_w.ws_col != render_w.ws_col || current_w.ws_row != (render_w.ws_row + 1)) {
+    if (current_w.ws_col != render_w.ws_col || current_w.ws_row != render_w.ws_row) {
         render_w = current_w;
-        if (render_w.ws_row > 1) {
-            render_w.ws_row -= 1;
-        }
+        
         bake_screen_rays(render_w.ws_col, render_w.ws_row);
+        
+        frame_data_bytes = ((size_t)(render_w.ws_col + 1) * render_w.ws_row) - 1;
+        required_size = frame_data_bytes + PREFIX_LEN + 64;
+        
+        if (required_size > buffer_size) {
+            buffer_size = required_size;
+            char *new_buffer = realloc(back_buffer, buffer_size);
+            if (!new_buffer) {
+                cleanup();
+                fprintf(stderr, "Buffer reallocation failed during resize\n");
+                exit(1);
+            }
+            back_buffer = new_buffer;
+        }
+
+        printf("\033[2J\033[H"); 
+        fflush(stdout);
     }
 }
 
@@ -202,7 +217,7 @@ void *render_thread_strip(void *arg) {
             }
             *buf_ptr++ = currentcharset[i >> (7 - charset_index)];
         }
-        *buf_ptr++ = '\n';
+        if(y) *buf_ptr++ = '\n';
     }
     return NULL;
 }
@@ -225,7 +240,7 @@ int main() {
     int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
     fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
 
-    printf("\033[?25l\033[2J");
+    printf("\033[?25l\033[2J\033[?7l");
     fflush(stdout);
 
     generate_random_map();
@@ -235,13 +250,6 @@ int main() {
 
     while (keep_running) {
         update_terminal_size();
-
-        size_t frame_data_bytes = (size_t)(render_w.ws_col + 1) * render_w.ws_row;
-        size_t required_size = frame_data_bytes + PREFIX_LEN + SUFFIX_LEN + 64;
-        if (required_size > buffer_size) {
-            buffer_size = required_size;
-            back_buffer = realloc(back_buffer, buffer_size);
-        }
 
         Vector3D forward = { .x = -sin_a * cos_b, .y = cos_a * cos_b, .z = sin_b };
         Vector3D strafe  = { .x = cos_a, .y = sin_a, .z = 0.0f };
@@ -313,7 +321,6 @@ int main() {
 
         memcpy(back_buffer, PREFIX_STR, PREFIX_LEN);
         size_t final_trailer_offset = PREFIX_LEN + frame_data_bytes;
-        memcpy(back_buffer + final_trailer_offset, SUFFIX_STR, SUFFIX_LEN);
 
         int rows_per_thread = render_w.ws_row / num_cores;
         for (int i = 0; i < num_cores; i++) {
@@ -328,8 +335,7 @@ int main() {
             pthread_join(threads[i], NULL);
         }
 
-        size_t packet_size = final_trailer_offset + SUFFIX_LEN;
-        write(STDOUT_FILENO, back_buffer, packet_size);
+        write(STDOUT_FILENO, back_buffer, final_trailer_offset);
 
         usleep(10000);
     }
