@@ -13,9 +13,10 @@
 
 #include "maps.h"
 
-const float speed = 3.5f;
+const float speed = 240.0f;
 const float look_speed = 4.0f;
-const float smoothing_factor = 0.18f;
+const float response = 12.0f;
+const double max_fps = 60.0;
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -25,16 +26,18 @@ const float smoothing_factor = 0.18f;
 
 #define MAX_THREADS 32
 
-#define PREFIX_STR "\033[H" 
-#define PREFIX_LEN 3
+#define PREFIX_STR "\033[?2026h\033[H"
+#define PREFIX_LEN 11
+#define SUFFIX_STR "\033[?2026l"
+#define SUFFIX_LEN 8
 
 const char *charset[] = {
-    "# ",
-    "#-. ",
-    "#*+=-:. ",
-    "S&MW$B@%#*+=-:. ",
-    "$#|)(1}{][\\?-_+~<>i!lI;:,\"^`'=. ",
-    "$@B%8&WMmwbdpqkhOQ0ULCJYXanxuvcrjf/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. "
+    "M ",
+    "M%* ",
+    "MOa{|!, ",
+    "MQgUX%ntl/*;:'` ",
+    "M@QRgKUEXa32yCsLc?>r*!;^\":,'-.` ",
+    "MBW@Q8R#gO6KUAG$PXa5w%2FIyC{1f7jL[]ivcl?|<>=)(/\\+r*!;^_\"~:,'-.` "
 };
 
 unsigned char ch;
@@ -79,7 +82,7 @@ int num_cores = 32;
 volatile sig_atomic_t keep_running = 1;
 
 void cleanup() {
-    printf("\033[?2026l\033[?25h\033[?7h\033[2J\033[H"); 
+    printf("\033[?2026l\033[?25h\033[?7h\033[2J\033[H");
     fflush(stdout);
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
     if (map.ptr) free(map.ptr); map.ptr = NULL;
@@ -127,12 +130,10 @@ void update_terminal_size() {
     }
     if (current_w.ws_col != render_w.ws_col || current_w.ws_row != render_w.ws_row) {
         render_w = current_w;
-        
+
         bake_screen_rays(render_w.ws_col, render_w.ws_row);
-        
         frame_data_bytes = ((size_t)(render_w.ws_col + 1) * render_w.ws_row) - 1;
         required_size = frame_data_bytes + PREFIX_LEN + 64;
-        
         if (required_size > buffer_size) {
             buffer_size = required_size;
             char *new_buffer = realloc(back_buffer, buffer_size);
@@ -144,7 +145,7 @@ void update_terminal_size() {
             back_buffer = new_buffer;
         }
 
-        printf("\033[2J\033[H"); 
+        printf("\033[2J\033[H");
         fflush(stdout);
     }
 }
@@ -205,7 +206,7 @@ void *render_thread_strip(void *arg) {
                 if (sample.z < 0.0f) {
                     if (map.border_type & B_BOTTOM) break;
                     else if (map.border_type & B_TOP) {i = render_length; break;}
-                    else { sample.z += (float)map.width; }
+                    else { sample.z += (float)map.height; }
 
                 } else if (sample.z >= (float)map.height) {
                     if (map.border_type & B_TOP) break;
@@ -220,6 +221,28 @@ void *render_thread_strip(void *arg) {
         if(y) *buf_ptr++ = '\n';
     }
     return NULL;
+}
+
+static double now_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+pthread_barrier_t bar_start, bar_done;
+
+void *worker_loop(void *arg) {
+    ThreadWorker *w = (ThreadWorker *)arg;
+    for (;;) {
+        pthread_barrier_wait(&bar_start);
+        if (!keep_running) return NULL;
+        int rows = render_w.ws_row;
+        int rpt = rows / num_cores;
+        w->start_y = rows - 1 - (w->thread_id * rpt);
+        w->end_y = (w->thread_id == num_cores - 1) ? 0 : rows - ((w->thread_id + 1) * rpt);
+        render_thread_strip(w);
+        pthread_barrier_wait(&bar_done);
+    }
 }
 
 int main() {
@@ -248,8 +271,27 @@ int main() {
 
     update_terminal_size();
 
+    pthread_barrier_init(&bar_start, NULL, num_cores + 1);
+    pthread_barrier_init(&bar_done, NULL, num_cores + 1);
+    for (int i = 0; i < num_cores; i++) {
+        workers[i].thread_id = i;
+        pthread_create(&threads[i], NULL, worker_loop, &workers[i]);
+    }
+
+    double last_time = now_sec();
+
     while (keep_running) {
+        double frame_start = now_sec();
+        float dt = (float)(frame_start - last_time);
+        last_time = frame_start;
+        if (dt > 0.1f)  dt = 0.1f;
+        float sf = 1.0f - expf(-response * dt);
+
         update_terminal_size();
+        if (!back_buffer || render_w.ws_col == 0 || render_w.ws_row == 0) {
+            usleep(50000);
+            continue;
+        }
 
         Vector3D forward = { .x = -sin_a * cos_b, .y = cos_a * cos_b, .z = sin_b };
         Vector3D strafe  = { .x = cos_a, .y = sin_a, .z = 0.0f };
@@ -290,14 +332,14 @@ int main() {
             }
         }
 
-        alpha += (target_alpha - alpha) * smoothing_factor;
-        beta  += (target_beta - beta) * smoothing_factor;
+        alpha += (target_alpha - alpha) * sf;
+        beta  += (target_beta - beta) * sf;
 
-        target_pos.x += (wish_dir.x * speed - target_pos.x) * smoothing_factor;
-        target_pos.y += (wish_dir.y * speed - target_pos.y) * smoothing_factor;
-        target_pos.z += (wish_dir.z * speed - target_pos.z) * smoothing_factor;
+        target_pos.x += (wish_dir.x * speed - target_pos.x) * sf;
+        target_pos.y += (wish_dir.y * speed - target_pos.y) * sf;
+        target_pos.z += (wish_dir.z * speed - target_pos.z) * sf;
 
-        pos.x += target_pos.x; pos.y += target_pos.y; pos.z += target_pos.z;
+        pos.x += target_pos.x * dt; pos.y += target_pos.y * dt; pos.z += target_pos.z * dt;
 
         float dim_x = (float)map.width; float dim_y = (float)map.length; float dim_z = (float)map.height;
 
@@ -322,23 +364,18 @@ int main() {
         memcpy(back_buffer, PREFIX_STR, PREFIX_LEN);
         size_t final_trailer_offset = PREFIX_LEN + frame_data_bytes;
 
-        int rows_per_thread = render_w.ws_row / num_cores;
-        for (int i = 0; i < num_cores; i++) {
-            workers[i].thread_id = i;
-            workers[i].start_y = render_w.ws_row - 1 - (i * rows_per_thread);
-            workers[i].end_y = (i == num_cores - 1) ? 0 : render_w.ws_row - ((i + 1) * rows_per_thread);
+        pthread_barrier_wait(&bar_start);
+        pthread_barrier_wait(&bar_done);
 
-            pthread_create(&threads[i], NULL, render_thread_strip, &workers[i]);
-        }
+        memcpy(back_buffer + final_trailer_offset, SUFFIX_STR, SUFFIX_LEN);
+        if (write(STDOUT_FILENO, back_buffer, final_trailer_offset + SUFFIX_LEN) < 0 && errno != EINTR && errno != EAGAIN) break;
 
-        for (int i = 0; i < num_cores; i++) {
-            pthread_join(threads[i], NULL);
-        }
-
-        write(STDOUT_FILENO, back_buffer, final_trailer_offset);
-
-        usleep(10000);
+        double budget = 1.0 / max_fps - (now_sec() - frame_start);
+        if (budget > 0.0) usleep((useconds_t)(budget * 1e6));
     }
+
+    pthread_barrier_wait(&bar_start);
+    for (int i = 0; i < num_cores; i++) pthread_join(threads[i], NULL);
 
     cleanup();
     return 0;
